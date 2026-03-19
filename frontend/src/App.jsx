@@ -309,7 +309,7 @@ export default function App() {
 
   // Check backend on mount
   useEffect(() => {
-    fetch("/api/health")
+    fetch("https://insight-ai-production.up.railway.app/api/health")
       .then(r => r.json())
       .then(d => setBackendOk(d))
       .catch(() => setBackendOk(null));
@@ -321,7 +321,7 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append("csv", file);
-      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const res = await fetch("https://insight-ai-production.up.railway.app/api/upload", { method: "POST", body: formData });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Upload failed");
       setDatasetInfo(data);
@@ -348,7 +348,7 @@ export default function App() {
     try {
       setTimeout(() => setPhase("Building your dashboard…"), 1200);
 
-      const res = await fetch("/api/generate", {
+      const res = await fetch("https://insight-ai-production.up.railway.app/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: q, sessionId, history: messages }),
