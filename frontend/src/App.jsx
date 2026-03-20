@@ -309,7 +309,7 @@ export default function App() {
 
   // Check backend on mount
   useEffect(() => {
-    fetch("https://insight-ai-production.up.railway.app/api/health")
+    fetch("/api/health")
       .then(r => r.json())
       .then(d => setBackendOk(d))
       .catch(() => setBackendOk(null));

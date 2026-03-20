@@ -141,7 +141,7 @@ app.post("/api/generate", async (req, res) => {
 
   const { headers, rows, stats, filename } = dataset;
 
-  const sampleRows = rows.slice(0, 50);
+  const sampleRows = rows.slice(0, 20);
 
   const systemPrompt = "You are an expert BI analyst. Analyze the data and return a JSON dashboard.\n\n" +
     "DATASET: " + filename + "\n" +
@@ -199,7 +199,7 @@ app.post("/api/generate", async (req, res) => {
         model: "llama-3.1-8b-instant",
         messages,
         temperature: 0.1,
-        max_tokens: 8192,
+        max_tokens: 4096,
         response_format: { type: "json_object" },
       }),
     });
