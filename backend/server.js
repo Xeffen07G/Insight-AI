@@ -41,7 +41,11 @@ if (GROQ_API_KEY && GROQ_API_KEY !== "PASTE_YOUR_GROQ_KEY_HERE") {
   console.warn("⚠️  GROQ_API_KEY not set — edit backend/.env");
 }
 
-app.use(cors());
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type"]
+}));
 app.use(express.json({ limit: "500mb" }));
 app.use(express.urlencoded({ extended: true, limit: "500mb" }));
 
