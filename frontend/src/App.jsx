@@ -301,13 +301,13 @@ export default function App() {
   const [loading, setLoading]         = useState(false);
   const [uploading, setUploading]     = useState(false);
   const [phase, setPhase]             = useState("");
+  const [listening, setListening]     = useState(false);
   const [backendOk, setBackendOk]     = useState(null);
-  const bottomRef = useRef(null);
+  const bottomRef   = useRef(null);
   const textareaRef = useRef(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
 
-  // Check backend on mount
   useEffect(() => {
     fetch("/api/health")
       .then(r => r.json())
@@ -315,13 +315,13 @@ export default function App() {
       .catch(() => setBackendOk(null));
   }, []);
 
-  // ── Upload CSV ────────────────────────────────────────────────────────────────
+  // ── Upload CSV ──────────────────────────────────────────────────────────────
   const handleUpload = useCallback(async (file) => {
     setUploading(true);
     try {
       const formData = new FormData();
       formData.append("csv", file);
-      const res = await fetch("https://insight-ai-production.up.railway.app/api/upload", { method: "POST", body: formData });
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Upload failed");
       setDatasetInfo(data);
@@ -334,7 +334,28 @@ export default function App() {
     }
   }, []);
 
-  // ── Generate dashboard ────────────────────────────────────────────────────────
+  // ── Voice input ─────────────────────────────────────────────────────────────
+  const handleVoice = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Your browser doesn't support voice input. Please use Chrome.");
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.onstart = () => setListening(true);
+    recognition.onend   = () => setListening(false);
+    recognition.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      setQuery(transcript);
+      setTimeout(() => handleSubmit(), 500);
+    };
+    recognition.onerror = () => setListening(false);
+    recognition.start();
+  };
+
+  // ── Generate dashboard ──────────────────────────────────────────────────────
   const handleSubmit = async () => {
     const q = query.trim();
     if (!q || loading || !sessionId) return;
@@ -348,7 +369,7 @@ export default function App() {
     try {
       setTimeout(() => setPhase("Building your dashboard…"), 1200);
 
-      const res = await fetch("https://insight-ai-production.up.railway.app/api/generate", {
+      const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: q, sessionId, history: messages }),
@@ -465,16 +486,14 @@ export default function App() {
 
         {/* ── Chat + Dashboard area ── */}
         <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          {/* Messages */}
           <div style={{ flex: 1, overflowY: "auto", padding: "24px", display: "flex", flexDirection: "column", gap: 20 }}>
 
-            {/* Empty state */}
             {!datasetInfo && (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: 40 }}>
                 <div style={{ fontSize: 52, marginBottom: 16 }}>📊</div>
                 <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--text-primary)", marginBottom: 8 }}>Upload your CSV to get started</h1>
                 <p style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.7, maxWidth: 400 }}>
-                  Drop any CSV file in the sidebar. Insight AI will analyze it with Gemini AI
+                  Drop any CSV file in the sidebar. Insight AI will analyze it with Groq AI
                   and generate interactive dashboards from plain-English questions.
                 </p>
                 <div style={{ marginTop: 24, display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
@@ -495,12 +514,11 @@ export default function App() {
                   Ask anything about <span style={{ color: "var(--accent)" }}>{datasetInfo.filename}</span>
                 </h2>
                 <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                  Type a question below or pick a suggestion from the sidebar
+                  Type or speak a question · pick a suggestion from the sidebar · or click 🎤 to use voice
                 </p>
               </div>
             )}
 
-            {/* Message list */}
             {messages.map((msg, i) => (
               <div key={i}>
                 {msg.role === "user" && (
@@ -527,7 +545,6 @@ export default function App() {
               </div>
             ))}
 
-            {/* Loading */}
             {loading && (
               <div style={{
                 display: "flex", alignItems: "center", gap: 12,
@@ -544,6 +561,18 @@ export default function App() {
                   ))}
                 </div>
                 <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{phase}</span>
+              </div>
+            )}
+
+            {listening && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 10,
+                background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.3)",
+                borderRadius: "var(--radius-lg)", padding: "12px 18px",
+                width: "fit-content",
+              }}>
+                <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#22c55e", animation: "bounce 1s ease-in-out infinite" }} />
+                <span style={{ fontSize: 13, color: "#22c55e", fontWeight: 500 }}>Listening… speak your question</span>
               </div>
             )}
 
@@ -571,7 +600,7 @@ export default function App() {
                   value={query}
                   onChange={e => setQuery(e.target.value)}
                   onKeyDown={handleKey}
-                  placeholder={`Ask about ${datasetInfo.filename}… e.g. "Show total sales by category"`}
+                  placeholder={listening ? "🎤 Listening..." : `Ask about ${datasetInfo.filename}… e.g. "Show total sales by category"`}
                   rows={1}
                   disabled={loading}
                   style={{
@@ -589,6 +618,23 @@ export default function App() {
                   onBlur={e => e.target.style.borderColor = "var(--border-hover)"}
                 />
                 <button
+                  onClick={handleVoice}
+                  disabled={loading || !datasetInfo}
+                  title="Click to speak your question"
+                  style={{
+                    background: listening ? "#22c55e" : "var(--bg-secondary)",
+                    border: listening ? "1px solid #22c55e" : "1px solid var(--border-hover)",
+                    borderRadius: "var(--radius-md)",
+                    padding: "10px 14px",
+                    fontSize: 18,
+                    cursor: loading || !datasetInfo ? "not-allowed" : "pointer",
+                    height: 42,
+                    transition: "all 0.2s",
+                  }}
+                >
+                  {listening ? "🔴" : "🎤"}
+                </button>
+                <button
                   onClick={handleSubmit}
                   disabled={loading || !query.trim()}
                   style={{
@@ -605,7 +651,7 @@ export default function App() {
               </div>
             )}
             <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-tertiary)" }}>
-              Enter to submit · Shift+Enter for new line · Follow-up questions supported
+              Enter to submit · Shift+Enter for new line · 🎤 click mic to use voice
             </div>
           </div>
         </main>
