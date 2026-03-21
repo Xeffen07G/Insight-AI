@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-const API = "http://localhost:5000";
+const API = "https://insight-ai-backend-98tv.onrender.com";
 
 function ChartWidget({ spec }) {
   const canvasRef = useRef(null);
