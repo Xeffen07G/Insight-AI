@@ -6,7 +6,8 @@ import fetch from "node-fetch";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-import Database from "better-sqlite3";
+import pkg from "pg";
+const { Pool } = pkg;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.join(__dirname, ".env");
@@ -40,26 +41,33 @@ if (GROQ_API_KEY && GROQ_API_KEY !== "PASTE_YOUR_GROQ_KEY_HERE") {
   console.warn("⚠️  GROQ_API_KEY not set — edit backend/.env");
 }
 
-// ── SQLite ─────────────────────────────────────────────────────────────────────
-const db = new Database(path.join(__dirname, "history.db"));
-db.exec(`
-  CREATE TABLE IF NOT EXISTS conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    text TEXT,
-    query TEXT,
-    dashboard TEXT,
-    created_at TEXT NOT NULL
-  );
-`);
-console.log("💾 SQLite database ready");
+// ── PostgreSQL (Supabase) setup ────────────────────────────────────────────────
+const DATABASE_URL = process.env.DATABASE_URL;
+let pool = null;
+
+if (DATABASE_URL) {
+  pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  pool.query(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      id SERIAL PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+      id SERIAL PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      text TEXT,
+      query TEXT,
+      dashboard TEXT,
+      created_at TEXT NOT NULL
+    );
+  `).then(() => console.log("💾 PostgreSQL database ready"))
+    .catch(err => console.error("❌ DB setup error:", err.message));
+} else {
+  console.warn("⚠️  DATABASE_URL not set — history will not persist");
+}
 
 app.use(cors({ origin: "*", methods: ["GET", "POST", "DELETE"], allowedHeaders: ["Content-Type"] }));
 app.use(express.json({ limit: "500mb" }));
@@ -91,15 +99,11 @@ function buildStats(headers, rows) {
   return stats;
 }
 
-// ── Compact stats to save tokens ───────────────────────────────────────────────
 function compactStats(stats) {
   const compact = {};
   for (const [k, v] of Object.entries(stats)) {
-    if (v.type === "numeric") {
-      compact[k] = { n: true, min: v.min, max: v.max, avg: v.avg, sum: v.sum };
-    } else {
-      compact[k] = { n: false, vals: v.uniqueValues.slice(0, 5), total: v.totalUnique };
-    }
+    if (v.type === "numeric") compact[k] = { n: true, min: v.min, max: v.max, avg: v.avg, sum: v.sum };
+    else compact[k] = { n: false, vals: v.uniqueValues.slice(0, 5), total: v.totalUnique };
   }
   return compact;
 }
@@ -108,7 +112,7 @@ app.get("/", (_req, res) => res.json({ message: "Insight AI Backend is running!"
 
 // ── POST /api/upload ───────────────────────────────────────────────────────────
 app.post("/api/upload", (req, res) => {
-  upload.single("csv")(req, res, (err) => {
+  upload.single("csv")(req, res, async (err) => {
     if (err) { console.error("Upload error:", err.message); return res.status(400).json({ error: err.message }); }
     try {
       if (!req.file) return res.status(400).json({ error: "No file uploaded." });
@@ -118,7 +122,10 @@ app.post("/api/upload", (req, res) => {
       const stats = buildStats(headers, rows);
       datasets.set(sessionId, { headers, rows, stats, filename: req.file.originalname });
       const chatId = sessionId;
-      db.prepare("INSERT INTO conversations (chat_id, filename, created_at) VALUES (?, ?, ?)").run(chatId, req.file.originalname, new Date().toISOString());
+      const now = new Date().toISOString();
+      if (pool) {
+        await pool.query("INSERT INTO conversations (chat_id, filename, created_at) VALUES ($1, $2, $3)", [chatId, req.file.originalname, now]);
+      }
       console.log("✅ Parsed:", rows.length, "rows,", headers.length, "columns");
       res.json({ sessionId, chatId, filename: req.file.originalname, headers, totalRows: rows.length, stats, preview: rows.slice(0, 3) });
     } catch (err) { console.error("Parse error:", err.message); res.status(400).json({ error: err.message }); }
@@ -136,15 +143,13 @@ app.post("/api/generate", async (req, res) => {
   if (!dataset) return res.status(400).json({ error: "Dataset not found. Please upload your CSV again." });
 
   const { headers, rows, stats, filename } = dataset;
-
-  // Ultra compact prompt to save tokens
   const sampleRows = rows.slice(0, 2);
   const cs = compactStats(stats);
 
   const systemPrompt =
     "You are a BI analyst. Return ONLY valid JSON dashboard. No markdown.\n" +
     "Dataset:" + filename + " Cols:" + headers.join(",") + " Rows:" + rows.length + "\n" +
-    "Stats(n=numeric,n=false=categorical):" + JSON.stringify(cs) + "\n" +
+    "Stats:" + JSON.stringify(cs) + "\n" +
     "Sample:" + JSON.stringify(sampleRows) + "\n" +
     "JSON structure:{title,summary,kpis:[{title,value,sub,color}],charts:[{title,insight,spec:{type,labels:[],datasets:[{label,data:[]}]}}],table:{title,headers:[],rows:[[]]}}\n" +
     "Rules:use stats for totals/avgs.line=trends,bar=compare,pie/doughnut=parts(max7),scatter=correlation.2-4 KPIs,1-3 charts.If cant answer:{error:reason}";
@@ -158,8 +163,9 @@ app.post("/api/generate", async (req, res) => {
   }
   messages.push({ role: "user", content: query });
 
-  if (chatId) {
-    db.prepare("INSERT INTO messages (chat_id, role, text, query, dashboard, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(chatId, "user", query, null, null, new Date().toISOString());
+  const now = new Date().toISOString();
+  if (pool && chatId) {
+    await pool.query("INSERT INTO messages (chat_id, role, text, query, dashboard, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [chatId, "user", query, null, null, now]);
   }
 
   try {
@@ -185,8 +191,8 @@ app.post("/api/generate", async (req, res) => {
     try { dashboard = JSON.parse(cleaned); }
     catch { return res.status(500).json({ error: "AI returned invalid format. Try rephrasing." }); }
 
-    if (chatId) {
-      db.prepare("INSERT INTO messages (chat_id, role, text, query, dashboard, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(chatId, "assistant", null, query, JSON.stringify(dashboard), new Date().toISOString());
+    if (pool && chatId) {
+      await pool.query("INSERT INTO messages (chat_id, role, text, query, dashboard, created_at) VALUES ($1, $2, $3, $4, $5, $6)", [chatId, "assistant", null, query, JSON.stringify(dashboard), new Date().toISOString()]);
     }
 
     console.log("✅ Dashboard ready:", dashboard.title || "(untitled)");
@@ -198,30 +204,33 @@ app.post("/api/generate", async (req, res) => {
 });
 
 // ── GET /api/history ───────────────────────────────────────────────────────────
-app.get("/api/history", (_req, res) => {
+app.get("/api/history", async (_req, res) => {
+  if (!pool) return res.json({ conversations: [] });
   try {
-    const convos = db.prepare("SELECT * FROM conversations ORDER BY created_at DESC LIMIT 20").all();
-    res.json({ conversations: convos });
+    const result = await pool.query("SELECT * FROM conversations ORDER BY created_at DESC LIMIT 20");
+    res.json({ conversations: result.rows });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── GET /api/history/:chatId ───────────────────────────────────────────────────
-app.get("/api/history/:chatId", (req, res) => {
+app.get("/api/history/:chatId", async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "Database not configured" });
   try {
     const { chatId } = req.params;
-    const convo = db.prepare("SELECT * FROM conversations WHERE chat_id = ?").get(chatId);
-    const msgs = db.prepare("SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC").all(chatId);
-    const parsed = msgs.map(m => ({ role: m.role, text: m.text, query: m.query, dashboard: m.dashboard ? JSON.parse(m.dashboard) : null }));
-    res.json({ conversation: convo, messages: parsed });
+    const convo = await pool.query("SELECT * FROM conversations WHERE chat_id = $1", [chatId]);
+    const msgs = await pool.query("SELECT * FROM messages WHERE chat_id = $1 ORDER BY created_at ASC", [chatId]);
+    const parsed = msgs.rows.map(m => ({ role: m.role, text: m.text, query: m.query, dashboard: m.dashboard ? JSON.parse(m.dashboard) : null }));
+    res.json({ conversation: convo.rows[0], messages: parsed });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── DELETE /api/history/:chatId ────────────────────────────────────────────────
-app.delete("/api/history/:chatId", (req, res) => {
+app.delete("/api/history/:chatId", async (req, res) => {
+  if (!pool) return res.status(500).json({ error: "Database not configured" });
   try {
     const { chatId } = req.params;
-    db.prepare("DELETE FROM conversations WHERE chat_id = ?").run(chatId);
-    db.prepare("DELETE FROM messages WHERE chat_id = ?").run(chatId);
+    await pool.query("DELETE FROM conversations WHERE chat_id = $1", [chatId]);
+    await pool.query("DELETE FROM messages WHERE chat_id = $1", [chatId]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
